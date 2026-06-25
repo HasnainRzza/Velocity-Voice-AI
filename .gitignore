@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+env/
+venv/
+.env
+
+# Ignore the data directory so we don't commit large state files
+data/
