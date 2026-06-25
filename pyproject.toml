@@ -1,0 +1,19 @@
+[Voice Agent]
+name = "voice-ai"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "chromadb>=1.5.0",
+    "deepgram-sdk>=7.3.1",
+    "dotenv>=0.9.9",
+    "fastapi>=0.100.0",
+    "groq>=1.5.0",
+    "httpx>=0.28.1",
+    "numpy>=2.5.0",
+    "pyaudio>=0.2.14",
+    "python-dotenv>=1.0.0",
+    "sounddevice>=0.5.5",
+    "uvicorn>=0.22.0",
+]
