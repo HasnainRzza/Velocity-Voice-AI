@@ -13,3 +13,5 @@ langgraph
 langchain-groq
 langchain-core
 langchain
+websockets 
+soundfile
