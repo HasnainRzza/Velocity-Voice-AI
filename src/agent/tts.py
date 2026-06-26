@@ -1,66 +1,79 @@
 import os
+import httpx
+import pyaudio
+import asyncio
 import threading
-import sounddevice as sd
+import subprocess
 from dotenv import load_dotenv
-from deepgram import DeepgramClient
 
 load_dotenv()
 
-API_KEY = os.getenv("DEEPGRAM_TTS")
-deepgram = DeepgramClient(api_key=API_KEY) if API_KEY else None
-
-def speak(text: str, interrupt_event: threading.Event = None) -> None:
-    if not deepgram:
-        print(f"TTS offline. Would say: {text}")
+async def speak_async(text: str, interrupt_event: threading.Event = None):
+    """
+    Synthesize text to speech using Deepgram in raw PCM format (16000Hz, 16-bit, mono) 
+    and streams it directly to PyAudio chunk-by-chunk for ultra-low latency.
+    """
+    api_key = os.getenv("DEEPGRAM_TTS")
+    if not api_key:
+        print("⚠️ DEEPGRAM_TTS is not set. Falling back to local TTS.", flush=True)
+        speak_locally(text)
         return
 
+    url = "https://api.deepgram.com/v1/speak"
+    params = {
+        "model": "aura-2-thalia-en",
+        "encoding": "linear16",
+        "sample_rate": "16000"
+    }
+    headers = {
+        "Authorization": f"Token {api_key}",
+        "Content-Type": "application/json"
+    }
+    data = {"text": text}
+
+    from agent.transcribe import global_pyaudio
+    import pyaudio
+    if global_pyaudio is None:
+        speak_locally(text)
+        return
+
+    stream = global_pyaudio.open(format=pyaudio.paInt16, channels=1, rate=16000, output=True)
+
     try:
-        audio_stream = deepgram.speak.v1.audio.generate(
-            text=text,
-            model="aura-2-thalia-en",
-            encoding="linear16",
-            sample_rate=24000,
-        )
-
-        stream = sd.RawOutputStream(
-            samplerate=24000,
-            channels=1,
-            dtype="int16",
-        )
-        
-        # Buffer some audio to prevent stuttering
-        buffer = []
-        buffer_size = 0
-        min_buffer_size = 24000 * 2 # 1 second of 16-bit audio (2 bytes per sample)
-        
-        for chunk in audio_stream:
-            buffer.append(chunk)
-            buffer_size += len(chunk)
-            if buffer_size >= min_buffer_size:
-                break
-                
-        stream.start()
-        
-        # Play the buffered audio first
-        for chunk in buffer:
-            if interrupt_event and interrupt_event.is_set():
-                print("\n[TTS Interrupted by User]")
-                stream.stop()
-                stream.close()
-                return
-            stream.write(chunk)
-            
-        # Continue playing the rest of the stream
-        for chunk in audio_stream:
-            if interrupt_event and interrupt_event.is_set():
-                print("\n[TTS Interrupted by User]")
-                break
-            stream.write(chunk)
-            
-        stream.stop()
-        stream.close()
+        async with httpx.AsyncClient() as client:
+            async with client.stream("POST", url, params=params, headers=headers, json=data) as response:
+                if response.status_code == 200:
+                    async for chunk in response.aiter_bytes(chunk_size=4096):
+                        # If user interrupts by speaking, immediately halt playback!
+                        if interrupt_event and interrupt_event.is_set():
+                            break
+                        stream.write(chunk)
+                else:
+                    text_err = await response.aread()
+                    print(f"⚠️ Deepgram PCM TTS failed: {text_err}", flush=True)
+                    speak_locally(text)
     except Exception as e:
-        print(f"\n[TTS Error: {e}]")
+        print(f"⚠️ Deepgram TTS failed: {e}. Falling back to local.", flush=True)
+        speak_locally(text)
+    finally:
+        stream.stop_stream()
+        stream.close()
 
-if __name__ == "__main__":
-    speak("Hello, this is a test.", threading.Event())
+def speak(text: str, interrupt_event: threading.Event = None):
+    """Synchronous wrapper to stream TTS."""
+    asyncio.run(speak_async(text, interrupt_event))
+
+def speak_locally(text: str):
+    """
+    Speak text locally using native Windows SpeechSynthesizer via PowerShell.
+    """
+    clean_text = text.replace('"', '""').replace("`", "``")
+    ps_cmd = f'Add-Type -AssemblyName System.Speech; $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer; $synth.Speak("{clean_text}")'
+    try:
+        subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, check=True)
+    except Exception as e:
+        print(f"⚠️ Local TTS failed: {e}", flush=True)
+
+def shutdown():
+    """Placeholder for graceful shutdowns if needed."""
+    pass

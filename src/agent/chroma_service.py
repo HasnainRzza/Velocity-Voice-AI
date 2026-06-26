@@ -8,7 +8,7 @@ import chromadb
 
 def configure_chroma_env() -> None:
     """Load environment variables from the voice-ai .env file and align them with Chroma's expected names."""
-    env_path = Path(__file__).resolve().parent / ".env"
+    env_path = Path(__file__).resolve().parents[2] / ".env"
     load_dotenv(env_path, override=False)
 
     mappings = {

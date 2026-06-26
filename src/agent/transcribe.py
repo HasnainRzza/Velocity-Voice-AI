@@ -9,10 +9,12 @@ from deepgram.core.events import EventType
 
 try:
     import pyaudio
+    global_pyaudio = pyaudio.PyAudio()
 except ImportError:
     pyaudio = None
+    global_pyaudio = None
 
-load_dotenv(Path(__file__).resolve().parent / ".env")
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 DEEPGRAM_STT = os.getenv("DEEPGRAM_STT")
 RATE = 16000
@@ -38,51 +40,55 @@ class Transcriber:
         
     def start(self):
         def listening_thread():
-            try:
-                with self.deepgram.listen.v1.connect(
-                    model="nova-3",
-                    language="en-US",
-                    interim_results=True,
-                    encoding="linear16",
-                    sample_rate=RATE,
-                ) as connection:
-                    self.connection = connection
-                    
-                    def on_message(message, **kwargs) -> None:
-                        # We receive message objects here.
-                        try:
-                            is_final = getattr(message, "is_final", False)
-                            speech_final = getattr(message, "speech_final", False)
-                            
-                            channel = getattr(message, "channel", None)
-                            if not channel:
-                                return
-                            alternatives = getattr(channel, "alternatives", [])
-                            if not alternatives:
-                                return
-                            
-                            transcript = getattr(alternatives[0], "transcript", "")
-                            
-                            if transcript and not self.ignore_mode:
-                                # If we got any transcript (interim or final), user is speaking -> Interrupt TTS
-                                self.interrupt_event.set()
+            import time
+            while not self.stop_event.is_set():
+                try:
+                    with self.deepgram.listen.v1.connect(
+                        model="nova-3",
+                        language="en-US",
+                        interim_results=True,
+                        encoding="linear16",
+                        sample_rate=RATE,
+                    ) as connection:
+                        self.connection = connection
+                        
+                        def on_message(message, **kwargs) -> None:
+                            # We receive message objects here.
+                            try:
+                                is_final = getattr(message, "is_final", False)
+                                speech_final = getattr(message, "speech_final", True)
                                 
-                                if is_final and transcript.strip():
-                                    print(f"\n[Transcribed]: {transcript}")
-                                    self.transcript_queue.put(transcript.strip())
-                        except Exception as e:
-                            print(f"Error parsing message: {e}")
+                                channel = getattr(message, "channel", None)
+                                if not channel:
+                                    return
+                                alternatives = getattr(channel, "alternatives", [])
+                                if not alternatives:
+                                    return
+                                
+                                transcript = getattr(alternatives[0], "transcript", "")
+                                
+                                if transcript and not self.ignore_mode:
+                                    # If we got any transcript (interim or final), user is speaking -> Interrupt TTS
+                                    self.interrupt_event.set()
+                                    
+                                    if is_final and transcript.strip():
+                                        print(f"\n[Transcribed]: {transcript}")
+                                        self.transcript_queue.put(transcript.strip())
+                            except Exception as e:
+                                print(f"Error parsing message: {e}")
 
-                    self.connection.on(EventType.MESSAGE, on_message)
-                    self.connection.on(EventType.ERROR, lambda error, **kwargs: print(f"STT Error: {error}"))
-                    
-                    self.connection.start_listening()
-                    
-                    # Keep context manager open
-                    self.stop_event.wait()
-            except Exception as e:
-                print(f"Error starting listening: {e}")
-                
+                        self.connection.on(EventType.MESSAGE, on_message)
+                        self.connection.on(EventType.ERROR, lambda error, **kwargs: print(f"STT Error: {error}"))
+                        
+                        self.connection.start_listening()
+                        
+                        # Keep context manager open
+                        self.stop_event.wait()
+                        break
+                except Exception as e:
+                    print(f"STT Connection Error: {e}. Retrying in 2 seconds...")
+                    time.sleep(2.0)
+                    self.connection = None
         self.listen_thread = threading.Thread(target=listening_thread, daemon=True)
         self.listen_thread.start()
         
@@ -94,8 +100,10 @@ class Transcriber:
         print("Microphone STT started...")
 
     def _microphone_thread(self):
-        audio = pyaudio.PyAudio()
-        stream = audio.open(
+        if global_pyaudio is None:
+            return
+            
+        stream = global_pyaudio.open(
             format=pyaudio.paInt16,
             channels=1,
             rate=RATE,
@@ -112,7 +120,6 @@ class Transcriber:
         finally:
             stream.stop_stream()
             stream.close()
-            audio.terminate()
             
     def set_ignore_mode(self, ignore: bool):
         self.ignore_mode = ignore

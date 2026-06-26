@@ -20,8 +20,6 @@ class SimpleRetriever:
         conditions = []
         if price_max is not None:
             conditions.append({"price": {"$lte": price_max}})
-        if car_name is not None:
-            conditions.append({"name": {"$eq": car_name}})
         
         where = None
         if len(conditions) == 1:
@@ -29,8 +27,14 @@ class SimpleRetriever:
         elif len(conditions) > 1:
             where = {"$and": conditions}
 
-        # Chroma requires at least one query text
-        query_text = query if query.strip() else "car"
+        # Chroma requires at least one query text. We combine query and car_name for semantic matching.
+        query_parts = []
+        if query.strip():
+            query_parts.append(query.strip())
+        if car_name and car_name.strip():
+            query_parts.append(car_name.strip())
+            
+        query_text = " ".join(query_parts) if query_parts else "car"
 
         kwargs = {
             "query_texts": [query_text],
@@ -39,6 +43,7 @@ class SimpleRetriever:
         if where:
             kwargs["where"] = where
 
+        print(f"\n[Semantic Search] Querying: '{query_text}' | Filters: {where}")
         results = self.collection.query(**kwargs)
 
         documents = results.get("documents", [[]])[0]
@@ -56,4 +61,9 @@ class SimpleRetriever:
                     "distance": distance,
                 }
             )
+
+        print(f"[Semantic Search] Retrieved {len(retrieved)} results:")
+        for r in retrieved:
+            print(f"  - [{r['distance']:.3f}] {r['metadata'].get('name', 'Unknown')}: {r['document'][:60]}...")
+
         return retrieved
