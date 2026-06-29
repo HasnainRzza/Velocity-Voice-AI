@@ -3,7 +3,7 @@
 A real-time, fully conversational AI agent built for the Genesis CPO car dealership. The system accepts browser microphone audio over a WebSocket, transcribes speech in real time using Deepgram, runs a stateful reasoning pipeline powered by Groq and LangGraph, queries a hybrid Redis and ChromaDB inventory database, and streams synthesised speech audio back to the browser. Barge-in (speaking over the agent) is supported with sub-150 ms interrupt latency.
 
 ---
-
+## Demo Video: https://drive.google.com/file/d/1eLPwuT-AS_akZoPOK_wDvGWW6HlP3TtX/view?usp=sharing
 ## Quick Start
 
 ### 1. Prerequisites
