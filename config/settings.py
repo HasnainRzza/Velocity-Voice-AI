@@ -1,8 +1,13 @@
 import os
 from pathlib import Path
+from dotenv import load_dotenv
 
 # Base Paths
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# Load .env file explicitly using the project root
+load_dotenv(PROJECT_ROOT / ".env")
+
 DATA_DIR = PROJECT_ROOT / "data"
 STATE_FILE = DATA_DIR / "genesis_inventory.json"
 CURR_STATE_FILE = DATA_DIR / "genesis_curr_inventory.json"
@@ -22,3 +27,17 @@ PAGINATION_RETRY_LIMIT = 2
 # Processing & Chroma Settings
 BATCH_SIZE = 100
 DEFAULT_COLLECTION = "genesis_inventory"
+
+# ── Redis & Event Stream Settings ──────────────────────────────────────────────
+# Redis connection URL (shared by the scraper publisher and the Cache Sync Service)
+REDIS_URL: str = os.environ["REDIS_URL"]
+
+# Stream key written to by the scraper and consumed by the Cache Sync Service
+EVENTS_STREAM_KEY: str = os.environ["EVENTS_STREAM_KEY"]
+
+# Approximate cap on stream length — prevents unbounded Redis memory growth
+EVENTS_MAX_LEN: int = int(os.environ["EVENTS_MAX_LEN"])
+
+# Publisher retry settings (transient connection errors only)
+EVENTS_PUBLISH_MAX_RETRIES: int = int(os.environ["EVENTS_PUBLISH_MAX_RETRIES"])
+EVENTS_PUBLISH_RETRY_DELAY_SEC: float = float(os.environ["EVENTS_PUBLISH_RETRY_DELAY_SEC"])
