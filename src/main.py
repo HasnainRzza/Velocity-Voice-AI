@@ -1,160 +1,70 @@
+import sys
 import os
-import threading
-from typing import TypedDict, List, Annotated, Optional
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
-from langgraph.graph import StateGraph, END
-from pydantic import BaseModel, Field
-from langchain_core.tools import tool
+# Bootstrap async logging FIRST — before any module calls logging.getLogger.
+import logging
+from core.logger import setup_logging, start_background_logger, stop_background_logger
 
-from agent.transcribe import Transcriber
-from agent.retriever import SimpleRetriever
-from agent.llm import get_llm, SYSTEM_PROMPT
-from agent.tts import speak
+setup_logging(log_file_name="voice_ai.log", level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# State Definition
-class State(TypedDict):
-    messages: List[any]
-    
-# Global instances for the hardware/services
-interrupt_event = threading.Event()
-transcriber = Transcriber(interrupt_event)
-retriever = SimpleRetriever(top_k=4)
-llm = get_llm()
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
-# Tool definition for LangChain
-@tool
-def search_inventory(query: Optional[str] = None, price_max: Optional[float] = None, car_name: Optional[str] = None) -> str:
-    """Search the Genesis inventory for cars matching the criteria. Use this to lookup cars before answering.
-    
-    Args:
-        query: The search query (e.g., 'luxury SUV').
-        price_max: Maximum price of the car.
-        car_name: Specific name or model of the car (e.g., 'GV80').
-    """
-    # Ensure query is at least an empty string for the retriever
-    query_str = query if query else ""
-    results = retriever.retrieve(query_str, price_max=price_max, car_name=car_name)
-    if not results:
-        return "No matching cars found in the inventory."
-    
-    docs = []
-    for r in results:
-        docs.append(f"- {r['document']} (Price: {r['metadata'].get('price', 'N/A')}, Name: {r['metadata'].get('name', 'N/A')})")
-    return "\n".join(docs)
+from core.health import perform_health_checks
+from core.cache import warm_up_cache, close_cache
+from api.websocket import router as websocket_router
 
-llm_with_tools = llm.bind_tools([search_inventory])
 
-# Nodes
-def listen_node(state: State):
-    print("\n[Agent is Listening...]")
-    interrupt_event.clear()
-    transcriber.set_ignore_mode(False)
-    
-    transcript = ""
-    while not transcript:
-        transcript = transcriber.get_transcript(timeout=0.5)
-        
-    print(f"\nUser: {transcript}")
-    
-    messages = state.get("messages", [])
-    if not messages:
-        messages = [SystemMessage(content=SYSTEM_PROMPT)]
-        
-    messages.append(HumanMessage(content=transcript))
-    return {"messages": messages}
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Start the background log-flush worker and recovery watcher.
+    await start_background_logger()
 
-def think_node(state: State):
-    print("\n[Agent is Thinking...]")
-    messages = state["messages"]
-    response = llm_with_tools.invoke(messages)
-    messages.append(response)
-    return {"messages": messages}
+    # Startup
+    logger.info("Starting up Voice AI service...")
 
-def retrieve_node(state: State):
-    print("\n[Agent is Retrieving...]")
-    # Tell user we are looking it up, and ignore interruptions
-    transcriber.set_ignore_mode(True)
-    msg = "Hang on a minute, let me check our inventory for you..."
-    print(f"Agent: {msg}")
-    speak(msg, interrupt_event)
-    
-    messages = state["messages"]
-    last_msg = messages[-1]
-    
-    if not hasattr(last_msg, "tool_calls") or not last_msg.tool_calls:
-        return {"messages": messages}
-        
-    for tool_call in last_msg.tool_calls:
-        if tool_call["name"] == "search_inventory":
-            args = tool_call["args"]
-            print(f"-> Searching: {args}")
-            result_str = search_inventory.invoke(args)
-            messages.append(ToolMessage(content=result_str, tool_call_id=tool_call["id"]))
-            
-    return {"messages": messages}
+    # Block until health checks pass
+    if not await perform_health_checks():
+        logger.error("Critical services are down. Cannot start.")
+        raise RuntimeError("Health checks failed.")
 
-def speak_node(state: State):
-    messages = state["messages"]
-    last_msg = messages[-1]
-    
-    if isinstance(last_msg, AIMessage) and last_msg.content:
-        text = last_msg.content
-        print(f"\nAgent: {text}")
-        
-        # Clear interrupt event before speaking
-        interrupt_event.clear()
-        transcriber.set_ignore_mode(False)
-        
-        # Play the actual agent response (Streaming)
-        speak(text, interrupt_event)
-        
-    return {"messages": messages}
+    # Warm up cache
+    await warm_up_cache()
 
-def should_retrieve(state: State):
-    last_msg = state["messages"][-1]
-    if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
-        return "retrieve"
-    return "speak"
+    logger.info("Service is ready to accept connections.")
+    yield
 
-# Graph Construction
-workflow = StateGraph(State)
+    # Shutdown — flush remaining log records before closing.
+    logger.info("Shutting down Voice AI service...")
+    await close_cache()
+    await stop_background_logger()
 
-workflow.add_node("listen", listen_node)
-workflow.add_node("think", think_node)
-workflow.add_node("retrieve", retrieve_node)
-workflow.add_node("speak", speak_node)
 
-# Set entry point to speak so it greets immediately!
-workflow.set_entry_point("speak")
+app = FastAPI(title="Voice AI Production Server", lifespan=lifespan)
 
-workflow.add_edge("listen", "think")
-workflow.add_conditional_edges("think", should_retrieve)
-workflow.add_edge("retrieve", "think")
-workflow.add_edge("speak", "listen")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-app = workflow.compile()
+app.include_router(websocket_router)
 
-def main():
-    print("Starting Conversational Agent...")
-    transcriber.start()
-    
-    # Pre-seed the state with the greeting!
-    initial_greeting = "Welcome to Genesis! How can I help you find your perfect car today?"
-    state = {
-        "messages": [
-            SystemMessage(content=SYSTEM_PROMPT),
-            AIMessage(content=initial_greeting)
-        ]
-    }
-    
-    try:
-        while True:
-            # We step through the graph. The graph is cyclic (speak -> listen -> think -> ...)
-            state = app.invoke(state)
-    except KeyboardInterrupt:
-        print("\nStopping Agent...")
-        transcriber.stop()
+# Serve the static HTML client for testing.
+# index.html lives one level above src/ (i.e. in voice-ai/), so we resolve
+# the parent directory relative to this file's absolute path rather than
+# relying on the CWD at runtime (which varies depending on where uvicorn
+# is invoked from).
+_STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="static")
+
 
 if __name__ == "__main__":
-    main()
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
